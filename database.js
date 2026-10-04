@@ -1,4 +1,4 @@
-const { DatabaseSync } = require('node:sqlite');
+﻿const { DatabaseSync } = require('node:sqlite');
 const path = require('path');
 const fs = require('fs');
 
@@ -231,60 +231,4 @@ db.exec(`
   );
 `);
 
-// Insert default task templates
-const defaultTasks = [
-  ['Alimentar cerdos', 'Alimentación', 1],
-  ['Revisar agua', 'Alimentación', 2],
-  ['Revisar corrales', 'Limpieza', 3],
-  ['Limpiar comederos', 'Limpieza', 4],
-  ['Revisar salud general', 'Salud', 5],
-  ['Aplicar medicamentos', 'Salud', 6],
-  ['Registrar pesos', 'Registro', 7],
-];
-// (LIMPIO: no crear tareas default en template - se crean si se desea)
-// defaultTasks.forEach(([name, cat, order]) => {
-//   try { db.prepare('INSERT OR IGNORE INTO task_templates (name, category, sort_order) VALUES (?, ?, ?)').run(name, cat, order); } catch (e) {}
-// });
-
-// Farms table
-db.exec(`
-  CREATE TABLE IF NOT EXISTS farms (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
-    location TEXT,
-    notes TEXT,
-    created_at TEXT DEFAULT (datetime('now','localtime'))
-  );
-// (LIMPIO: no crear granja default ni seed en template)
-`);
-
-// Add farm_id to all tables
-const farmCols = [
-  'pigs', 'batches', 'expenses', 'sales', 'feeding_records', 'health_records',
-  'weight_records', 'inventory_items', 'daily_logs', 'partners', 'reproduction_records',
-  'inventory_categories'
-];
-farmCols.forEach(t => {
-  try { db.exec(`ALTER TABLE ${t} ADD COLUMN farm_id INTEGER REFERENCES farms(id) ON DELETE CASCADE`); } catch (e) {}
-});
-try { db.exec('ALTER TABLE feed_orders ADD COLUMN farm_id INTEGER REFERENCES farms(id) ON DELETE CASCADE'); } catch (e) {}
-try { db.exec('ALTER TABLE inventory_categories ADD COLUMN farm_id INTEGER REFERENCES farms(id) ON DELETE CASCADE'); } catch (e) {}
-// (No default categories insert - wizard las crea o usuario)
-
-// Create indexes
-const indexSqls = [
-  'CREATE INDEX IF NOT EXISTS idx_feeding_pig ON feeding_records(pig_id)',
-  'CREATE INDEX IF NOT EXISTS idx_feeding_date ON feeding_records(date)',
-  'CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(date)',
-  'CREATE INDEX IF NOT EXISTS idx_sales_date ON sales(date)',
-  'CREATE INDEX IF NOT EXISTS idx_weight_pig ON weight_records(pig_id)',
-  'CREATE INDEX IF NOT EXISTS idx_health_pig ON health_records(pig_id)',
-  'CREATE INDEX IF NOT EXISTS idx_partner_tx ON partner_transactions(partner_id)',
-  'CREATE INDEX IF NOT EXISTS idx_reproduction_sow ON reproduction_records(sow_id)',
-  'CREATE INDEX IF NOT EXISTS idx_reproduction_date ON reproduction_records(mating_date)',
-  'CREATE INDEX IF NOT EXISTS idx_feed_orders_date ON feed_orders(order_date)',
-  'CREATE INDEX IF NOT EXISTS idx_daily_tasks_date ON daily_task_logs(date)',
-];
-indexSqls.forEach(sql => db.exec(sql));
-
-module.exports = db;
+// No default task templates in template
