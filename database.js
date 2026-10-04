@@ -241,9 +241,10 @@ const defaultTasks = [
   ['Aplicar medicamentos', 'Salud', 6],
   ['Registrar pesos', 'Registro', 7],
 ];
-defaultTasks.forEach(([name, cat, order]) => {
-  try { db.prepare('INSERT OR IGNORE INTO task_templates (name, category, sort_order) VALUES (?, ?, ?)').run(name, cat, order); } catch (e) {}
-});
+// (LIMPIO: no crear tareas default en template - se crean si se desea)
+// defaultTasks.forEach(([name, cat, order]) => {
+//   try { db.prepare('INSERT OR IGNORE INTO task_templates (name, category, sort_order) VALUES (?, ?, ?)').run(name, cat, order); } catch (e) {}
+// });
 
 // Farms table
 db.exec(`
@@ -254,8 +255,8 @@ db.exec(`
     notes TEXT,
     created_at TEXT DEFAULT (datetime('now','localtime'))
   );
+// (LIMPIO: no crear granja default ni seed en template)
 `);
-try { db.prepare("INSERT OR IGNORE INTO farms (id, name, location) VALUES (1, 'Granja Principal', '')").run(); } catch (e) {}
 
 // Add farm_id to all tables
 const farmCols = [
@@ -264,16 +265,11 @@ const farmCols = [
   'inventory_categories'
 ];
 farmCols.forEach(t => {
-  try { db.exec(`ALTER TABLE ${t} ADD COLUMN farm_id INTEGER DEFAULT 1 REFERENCES farms(id) ON DELETE CASCADE`); } catch (e) {}
+  try { db.exec(`ALTER TABLE ${t} ADD COLUMN farm_id INTEGER REFERENCES farms(id) ON DELETE CASCADE`); } catch (e) {}
 });
-try { db.exec('ALTER TABLE feed_orders ADD COLUMN farm_id INTEGER DEFAULT 1 REFERENCES farms(id) ON DELETE CASCADE'); } catch (e) {}
-// inventory_movements don't need farm_id (they follow the item)
-
-// Insert default inventory categories
-const cats = ['Alimento', 'Medicina', 'Equipo', 'Otros'];
-cats.forEach(name => {
-  try { db.prepare('INSERT OR IGNORE INTO inventory_categories (name) VALUES (?)').run(name); } catch (e) {}
-});
+try { db.exec('ALTER TABLE feed_orders ADD COLUMN farm_id INTEGER REFERENCES farms(id) ON DELETE CASCADE'); } catch (e) {}
+try { db.exec('ALTER TABLE inventory_categories ADD COLUMN farm_id INTEGER REFERENCES farms(id) ON DELETE CASCADE'); } catch (e) {}
+// (No default categories insert - wizard las crea o usuario)
 
 // Create indexes
 const indexSqls = [
