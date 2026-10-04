@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: cerdos-app
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    repo: https://github.com/cracjuego454-glitch/cerdos-template
+    branch: main
+    autoDeploy: true
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
