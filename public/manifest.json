@@ -1,0 +1,13 @@
+{
+  "name": "Cerdos by LOMI",
+  "short_name": "Cerdos LOMI",
+  "description": "Control de engorde de cerdos",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1a1a2e",
+  "theme_color": "#1a1a2e",
+  "orientation": "any",
+  "icons": [
+    { "src": "img/logo.jpg", "sizes": "512x512", "type": "image/jpeg", "purpose": "any" }
+  ]
+}

@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cerdos by LOMI</title>
+  <link rel="manifest" href="manifest.json">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Cerdos LOMI">
+  <link rel="stylesheet" href="css/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <div id="welcome-screen">
+    <div class="welcome-content">
+      <img src="img/logo.jpg" alt="Cerdos by LOMI" class="welcome-logo">
+      <h1 class="welcome-title">🐷 Cerdos by LOMI</h1>
+      <button class="btn btn-welcome" onclick="App.enterApp()">🚀 Iniciar</button>
+    </div>
+  </div>
+  <div id="app" style="display:none">
+    <aside id="sidebar">
+      <div class="sidebar-header">
+        <h1>🐷 Cerdos by LOMI</h1>
+      </div>
+      <div style="padding:8px 12px;display:flex;gap:4px">
+        <select id="farmSelector" onchange="App.switchFarm(this.value)" style="flex:1;padding:6px;border-radius:6px;border:1px solid #ddd;font-size:0.85rem">
+          <option value="">🌍 Cargando...</option>
+        </select>
+        <button id="deleteFarmBtn" onclick="App.deleteFarm()" style="display:none;background:#e74c3c;color:#fff;border:none;border-radius:6px;cursor:pointer;padding:0 8px;font-size:1rem" title="Eliminar granja">✕</button>
+      </div>
+      <nav>
+        <a href="#" data-page="dashboard" class="active">📊 Dashboard</a>
+        <a href="#" data-page="pigs">🐖 Cerdos</a>
+        <a href="#" data-page="feeding">🍽️ Alimentación</a>
+        <a href="#" data-page="weight">⚖️ Pesos</a>
+        <a href="#" data-page="health">💊 Salud</a>
+        <a href="#" data-page="expenses">💰 Gastos</a>
+        <a href="#" data-page="sales">📈 Ventas</a>
+        <a href="#" data-page="reproduction">🧬 Reproducción</a>
+        <a href="#" data-page="deaths">⚰️ Muertes</a>
+        <a href="#" data-page="dailytasks">✅ Tareas</a>
+        <a href="#" data-page="batches">🏷️ Lotes</a>
+        <a href="#" data-page="feedorders">🛒 Pedidos</a>
+        <a href="#" data-page="familytree">🌳 Genealogía</a>
+        <a href="#" data-page="inventory">📦 Inventario</a>
+        <a href="#" data-page="logbook">📅 Bitácora</a>
+        <a href="#" data-page="partners">🤝 Socios</a>
+        <a href="#" data-page="reports">📋 Reportes</a>
+      </nav>
+      <div style="padding:12px;border-top:1px solid rgba(255,255,255,0.1);margin-top:auto">
+        <button id="darkModeToggle" onclick="App.toggleDarkMode()" style="background:none;border:1px solid rgba(255,255,255,0.2);color:#a0a0b8;padding:8px 12px;border-radius:6px;cursor:pointer;width:100%;font-size:0.85rem">🌙 Modo oscuro</button>
+      </div>
+    </aside>
+    <main id="main-content">
+      <div id="page-content"></div>
+    </main>
+  </div>
+
+  <script src="js/api.js"></script>
+  <script src="js/pages/dashboard.js"></script>
+  <script src="js/pages/pigs.js"></script>
+  <script src="js/pages/feeding.js"></script>
+  <script src="js/pages/weight.js"></script>
+  <script src="js/pages/health.js"></script>
+  <script src="js/pages/expenses.js"></script>
+  <script src="js/pages/sales.js"></script>
+  <script src="js/pages/reports.js"></script>
+  <script src="js/pages/partners.js"></script>
+  <script src="js/pages/batches.js"></script>
+  <script src="js/pages/inventory.js"></script>
+  <script src="js/pages/logbook.js"></script>
+  <script src="js/pages/reproduction.js"></script>
+  <script src="js/pages/deaths.js"></script>
+  <script src="js/pages/feedorders.js"></script>
+  <script src="js/pages/dailytasks.js"></script>
+  <script src="js/pages/familytree.js"></script>
+  <script src="js/app.js"></script>
+  <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');</script>
+</body>
+</html>

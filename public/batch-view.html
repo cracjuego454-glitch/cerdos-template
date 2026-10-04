@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lote - Cerdos by LOMI</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: #f5f5f5; padding: 16px; color: #333; }
+    .header { text-align: center; padding: 12px; background: linear-gradient(135deg,#43a047,#2e7d32); color: #fff; border-radius: 12px; margin-bottom: 16px; }
+    .header h1 { font-size: 1.5rem; }
+    .header .sub { font-size: 0.85rem; opacity: 0.9; }
+    .card { background: #fff; border-radius: 12px; padding: 16px; margin-bottom: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.1); }
+    .card h2 { font-size: 1rem; color: #555; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
+    .row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #f0f0f0; font-size: 0.95rem; }
+    .row:last-child { border: none; }
+    .label { color: #777; }
+    .value { font-weight: 600; }
+    .ok { color: #2e7d32; }
+    .warn { color: #e65100; }
+    .bad { color: #c62828; }
+    .big { font-size: 2rem; text-align: center; padding: 8px; }
+    .pig-list { display: flex; flex-wrap: wrap; gap: 6px; }
+    .pig-tag { background: #e3f2fd; padding: 4px 10px; border-radius: 16px; font-size: 0.85rem; }
+    .pig-tag.sold { background: #fff8e1; }
+    .pig-tag.dead { background: #fbe9e7; text-decoration: line-through; }
+    .footer { text-align: center; font-size: 0.75rem; color: #999; padding: 16px; }
+    .loading { text-align: center; padding: 40px; color: #999; }
+    .alert { padding: 10px; border-radius: 8px; margin: 8px 0; font-size: 0.9rem; }
+    .alert-info { background: #e3f2fd; }
+    .alert-success { background: #e8f5e9; }
+    .alert-danger { background: #fbe9e7; }
+    .refresh-btn { display: block; width: 100%; padding: 10px; background: #43a047; color: #fff; border: none; border-radius: 8px; font-size: 1rem; cursor: pointer; margin: 12px 0; }
+    .refresh-btn:active { background: #2e7d32; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>🏷️ <span id="batchName">Cargando...</span></h1>
+    <div class="sub" id="batchSub">Actualizando cada 30s</div>
+  </div>
+  <div id="content">
+    <div class="loading">⏳ Cargando información del lote...</div>
+  </div>
+  <button class="refresh-btn" onclick="loadBatch()">🔄 Actualizar ahora</button>
+  <div class="footer">🐷 Cerdos by LOMI</div>
+
+  <script>
+    const API_BASE = '';
+    async function api(url) {
+      const r = await fetch(API_BASE + url);
+      if (!r.ok) throw new Error(await r.text());
+      return r.json();
+    }
+
+    function getToday() { return new Date().toISOString().split('T')[0]; }
+
+    async function loadBatch() {
+      const params = new URLSearchParams(window.location.search);
+      const id = params.get('id');
+      if (!id) {
+        document.getElementById('content').innerHTML = '<div class="card"><div class="alert alert-danger">❌ Lote no especificado. Añade ?id=NUMERO a la URL.</div></div>';
+        return;
+      }
+      document.getElementById('content').innerHTML = '<div class="loading">⏳ Cargando...</div>';
+      try {
+        const batch = await api(`/api/reports/batch/${id}`);
+        const pigs = await api(`/api/pigs?batch_id=${id}`);
+        const todayFeed = await api(`/api/feeding?from=${getToday()}&to=${getToday()}&limit=200`);
+        const todayFeedPigs = todayFeed.filter(f => pigs.some(p => p.id === f.pig_id));
+
+        document.getElementById('batchName').textContent = batch.batch.name;
+        document.getElementById('batchSub').textContent = `📅 ${new Date().toLocaleDateString()} · ${pigs.length} cerdos · Actualizando cada 30s`;
+
+        const fedCount = new Set(todayFeedPigs.map(f => f.pig_id)).size;
+        const notFed = pigs.filter(p => !todayFeedPigs.some(f => f.pig_id === p.id) && p.status === 'active');
+        const recentWeights = [];
+        for (const p of pigs) {
+          if (p.status === 'active') {
+            const w = await api(`/api/weight?pig_id=${p.id}&limit=1`);
+            if (w.length) recentWeights.push({ id: p.identifier, weight: w[0].weight_kg, date: w[0].date });
+          }
+        }
+        const avgWeight = recentWeights.length ? (recentWeights.reduce((s, w) => s + w.weight, 0) / recentWeights.length).toFixed(1) : 0;
+
+        const totalFeedKg = todayFeedPigs.reduce((s, f) => s + f.quantity_kg, 0);
+        const active = pigs.filter(p => p.status === 'active').length;
+        const sold = pigs.filter(p => p.status === 'sold').length;
+        const dead = pigs.filter(p => p.status === 'dead').length;
+
+        document.getElementById('content').innerHTML = `
+          <div class="card">
+            <h2>📊 Resumen del Lote</h2>
+            <div class="row"><span class="label">Cerdos</span><span class="value">${active} activos · ${sold} vendidos · ${dead} muertos</span></div>
+            <div class="row"><span class="label">Peso promedio</span><span class="value">${avgWeight} kg</span></div>
+            <div class="row"><span class="label">Inicio</span><span class="value">${batch.batch.start_date || '-'}</span></div>
+            <div class="row"><span class="label">Total inversión</span><span class="value">$${(batch.totals.total_purchase + batch.totals.total_feed + batch.totals.total_health + batch.totals.total_expenses).toFixed(2)}</span></div>
+          </div>
+
+          <div class="card">
+            <h2>🍽️ Comida de Hoy</h2>
+            <div class="big ${fedCount === active ? 'ok' : fedCount > 0 ? 'warn' : 'bad'}">${fedCount} / ${active}</div>
+            <div style="text-align:center;color:#777;font-size:0.9rem">cerdos alimentados · ${totalFeedKg.toFixed(1)} kg total</div>
+            ${notFed.length > 0 ? `
+              <div class="alert alert-warning" style="background:#fff8e1;padding:8px;border-radius:8px;margin-top:8px">
+                ⚠️ <strong>${notFed.length} cerdo(s) sin comer hoy:</strong>
+                <div class="pig-list" style="margin-top:4px">${notFed.map(p => `<span class="pig-tag">${p.identifier}</span>`).join('')}</div>
+              </div>
+            ` : '<div class="alert alert-success" style="margin-top:8px">✅ Todos los cerdos han comido hoy</div>'}
+          </div>
+
+          ${recentWeights.length ? `
+            <div class="card">
+              <h2>⚖️ Últimos Pesos</h2>
+              ${recentWeights.sort((a,b) => a.weight - b.weight).map(w => `
+                <div class="row"><span class="label">${w.id}</span><span class="value">${w.weight} kg <span style="color:#999;font-size:0.8rem">(${w.date})</span></span></div>
+              `).join('')}
+            </div>
+          ` : ''}
+
+          <div class="card">
+            <h2>🐖 Todos los Cerdos</h2>
+            <div class="pig-list">
+              ${pigs.map(p => `<span class="pig-tag ${p.status}">${p.identifier} ${p.status === 'sold' ? '💲' : p.status === 'dead' ? '⚰️' : ''}</span>`).join('')}
+            </div>
+          </div>
+        `;
+      } catch (e) {
+        document.getElementById('content').innerHTML = `<div class="card"><div class="alert alert-danger">❌ Error: ${e.message}</div></div>`;
+      }
+    }
+
+    loadBatch();
+    setInterval(loadBatch, 30000);
+  </script>
+</body>
+</html>
