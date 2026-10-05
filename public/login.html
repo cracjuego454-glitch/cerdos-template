@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Acceso &middot; Cerdos by LOMI</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body class="auth-body">
+  <div id="auth-root" class="auth-wrap">
+    <div class="auth-card">
+      <div class="auth-head">
+        <img src="img/logo.jpg" alt="Cerdos by LOMI" class="auth-logo">
+        <h1>🐷 Cerdos by LOMI</h1>
+      </div>
+
+      <div id="auth-loading" class="auth-msg">Cargando...</div>
+
+      <!-- PASO 1: asistente de primer arranque -->
+      <form id="setup-form" class="auth-form" style="display:none">
+        <h2 class="auth-title">Configuración inicial</h2>
+        <p class="auth-sub">Crea tu granja y la cuenta de administrador.</p>
+
+        <label class="auth-label" for="su-farm">Nombre de la granja *</label>
+        <input id="su-farm" class="auth-input" type="text" placeholder="Ej. Finca El Roble" required>
+
+        <label class="auth-label" for="su-loc">Ubicación</label>
+        <input id="su-loc" class="auth-input" type="text" placeholder="Ej. Valle Central">
+
+        <hr class="auth-sep">
+
+        <label class="auth-label" for="su-user">Usuario administrador *</label>
+        <input id="su-user" class="auth-input" type="text" placeholder="Ej. admin" autocomplete="username" required>
+
+        <label class="auth-label" for="su-name">Nombre para mostrar</label>
+        <input id="su-name" class="auth-input" type="text" placeholder="Ej. Juan Pérez">
+
+        <label class="auth-label" for="su-pass">Contraseña *</label>
+        <input id="su-pass" class="auth-input" type="password" placeholder="Mínimo 6 caracteres" autocomplete="new-password" required>
+
+        <label class="auth-label" for="su-pass2">Repetir contraseña *</label>
+        <input id="su-pass2" class="auth-input" type="password" autocomplete="new-password" required>
+
+        <div id="su-error" class="alert alert-danger" style="display:none"></div>
+        <button class="btn btn-auth" type="submit">🚀 Crear granja y entrar</button>
+      </form>
+
+      <!-- PASO 2: login -->
+      <form id="login-form" class="auth-form" style="display:none">
+        <h2 class="auth-title">Iniciar sesión</h2>
+        <p class="auth-sub" id="login-farm"></p>
+
+        <label class="auth-label" for="li-user">Usuario</label>
+        <input id="li-user" class="auth-input" type="text" autocomplete="username" required autofocus>
+
+        <label class="auth-label" for="li-pass">Contraseña</label>
+        <input id="li-pass" class="auth-input" type="password" autocomplete="current-password" required>
+
+        <div id="li-error" class="alert alert-danger" style="display:none"></div>
+        <button class="btn btn-auth" type="submit">Entrar</button>
+      </form>
+    </div>
+  </div>
+
+  <script src="js/auth.js"></script>
+</body>
+</html>

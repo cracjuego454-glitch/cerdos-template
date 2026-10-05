@@ -1,22 +1,61 @@
 const App = {
   currentPage: 'dashboard',
   farms: [],
-  pages: { dashboard: Dashboard, pigs: Pigs, feeding: Feeding, weight: Weight, health: Health, expenses: Expenses, sales: Sales, partners: Partners, reports: Reports, batches: Batches, inventory: Inventory, logbook: Logbook, reproduction: Reproduction, deaths: Deaths, feedorders: FeedOrders, dailytasks: DailyTasks, familytree: FamilyTree },
+  user: null,
+  pages: { dashboard: Dashboard, pigs: Pigs, feeding: Feeding, weight: Weight, health: Health, expenses: Expenses, sales: Sales, partners: Partners, reports: Reports, batches: Batches, inventory: Inventory, logbook: Logbook, reproduction: Reproduction, deaths: Deaths, feedorders: FeedOrders, dailytasks: DailyTasks, familytree: FamilyTree, users: Users },
+
+  get isAdmin() { return !!this.user && this.user.role === 'admin'; },
+
+  async loadSession() {
+    const r = await fetch('/api/auth/me');
+    if (r.status === 401) { location.href = 'login.html'; return false; }
+    const data = await r.json();
+    this.user = data.user;
+    this.farms = data.farms || [];
+    if (!this.isAdmin && this.user.farm_id) API.setFarmId(this.user.farm_id);
+    // La pagina de usuarios y las granjas multiples son solo de admin
+    document.querySelectorAll('[data-page="users"]').forEach(a => a.style.display = this.isAdmin ? '' : 'none');
+    return true;
+  },
+
+  renderUserBox() {
+    const box = document.getElementById('userBox');
+    if (!box || !this.user) return;
+    const role = this.isAdmin ? '👑 Administrador' : '👷 Trabajador';
+    box.innerHTML = `
+      <div class="user-name">${this.user.name || this.user.username}</div>
+      <div class="user-role">${role}</div>
+      <button onclick="App.logout()">🚪 Cerrar sesión</button>`;
+  },
+
+  async logout() {
+    await fetch('/api/auth/logout', { method: 'POST' });
+    localStorage.removeItem('farm_id');
+    location.href = 'login.html';
+  },
 
   async loadFarms() {
     try {
       this.farms = await API.get('/api/farms');
       const sel = document.getElementById('farmSelector');
       if (!sel) return;
+      const del = document.getElementById('deleteFarmBtn');
+      if (!this.isAdmin) {
+        // El trabajador no cambia de granja: queda atado a la suya
+        sel.innerHTML = this.farms.map(f => `<option value="${f.id}" selected>${f.name}</option>`).join('');
+        if (del) del.style.display = 'none';
+        return;
+      }
       const current = API.getFarmId();
       sel.innerHTML = '<option value="">🌍 Todas las granjas</option>' +
         this.farms.map(f => `<option value="${f.id}" ${current == f.id ? 'selected' : ''}>${f.name}</option>`).join('') +
         '<option value="new">➕ Nueva granja...</option>';
-      document.getElementById('deleteFarmBtn').style.display = current ? 'block' : 'none';
+      if (del) del.style.display = current ? 'block' : 'none';
     } catch (e) { console.error('Error loading farms:', e); }
   },
 
   async switchFarm(id) {
+    if (!this.isAdmin) return;
     if (id === 'new') {
       const name = prompt('Nombre de la nueva granja:');
       if (!name) { this.loadFarms(); return; }
@@ -33,6 +72,7 @@ const App = {
   },
 
   async deleteFarm() {
+    if (!this.isAdmin) return;
     const id = API.getFarmId();
     if (!id) return;
     const farm = this.farms.find(f => f.id == id);
@@ -53,7 +93,7 @@ const App = {
     document.getElementById('darkModeToggle').textContent = isDark ? '🌙 Modo oscuro' : '☀️ Modo claro';
   },
 
-  enterApp() {
+  async enterApp() {
     const saved = localStorage.getItem('darkMode');
     if (saved === 'dark') {
       document.documentElement.setAttribute('data-theme', 'dark');
@@ -63,6 +103,7 @@ const App = {
     setTimeout(() => {
       document.getElementById('welcome-screen').style.display = 'none';
       document.getElementById('app').style.display = 'flex';
+      this.renderUserBox();
       this.loadFarms();
       this.navigate('dashboard');
     }, 500);
@@ -79,6 +120,7 @@ const App = {
       content.innerHTML = await pageModule.render();
       if (pageModule.afterRender) pageModule.afterRender();
     } catch (e) {
+      if (String(e.message).includes('Sesion expirada')) return;
       content.innerHTML = `<div class="card"><div class="alert alert-danger">Error: ${e.message}</div></div>`;
     }
   },
@@ -93,4 +135,7 @@ const App = {
   }
 };
 
-document.addEventListener('DOMContentLoaded', () => App.init());
+document.addEventListener('DOMContentLoaded', async () => {
+  App.init();
+  if (await App.loadSession()) App.enterApp();
+});

@@ -15,7 +15,7 @@
     <div class="welcome-content">
       <img src="img/logo.jpg" alt="Cerdos by LOMI" class="welcome-logo">
       <h1 class="welcome-title">🐷 Cerdos by LOMI</h1>
-      <button class="btn btn-welcome" onclick="App.enterApp()">🚀 Iniciar</button>
+      <button class="btn btn-welcome" onclick="App.enterApp()">🚀 Iniciar sesión</button>
     </div>
   </div>
   <div id="app" style="display:none">
@@ -47,10 +47,12 @@
         <a href="#" data-page="logbook">📅 Bitácora</a>
         <a href="#" data-page="partners">🤝 Socios</a>
         <a href="#" data-page="reports">📋 Reportes</a>
+        <a href="#" data-page="users" id="usersNavLink">👥 Usuarios</a>
       </nav>
       <div style="padding:12px;border-top:1px solid rgba(255,255,255,0.1);margin-top:auto">
         <button id="darkModeToggle" onclick="App.toggleDarkMode()" style="background:none;border:1px solid rgba(255,255,255,0.2);color:#a0a0b8;padding:8px 12px;border-radius:6px;cursor:pointer;width:100%;font-size:0.85rem">🌙 Modo oscuro</button>
       </div>
+      <div class="user-box" id="userBox"></div>
     </aside>
     <main id="main-content">
       <div id="page-content"></div>
@@ -75,6 +77,7 @@
   <script src="js/pages/feedorders.js"></script>
   <script src="js/pages/dailytasks.js"></script>
   <script src="js/pages/familytree.js"></script>
+  <script src="js/pages/users.js"></script>
   <script src="js/app.js"></script>
   <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');</script>
 </body>

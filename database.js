@@ -1,4 +1,4 @@
-﻿const { DatabaseSync } = require('node:sqlite');
+const { DatabaseSync } = require('node:sqlite');
 const path = require('path');
 const fs = require('fs');
 
@@ -231,4 +231,91 @@ db.exec(`
   );
 `);
 
-// No default task templates in template
+// Insert default task templates
+const defaultTasks = [
+  ['Alimentar cerdos', 'AlimentaciÃ³n', 1],
+  ['Revisar agua', 'AlimentaciÃ³n', 2],
+  ['Revisar corrales', 'Limpieza', 3],
+  ['Limpiar comederos', 'Limpieza', 4],
+  ['Revisar salud general', 'Salud', 5],
+  ['Aplicar medicamentos', 'Salud', 6],
+  ['Registrar pesos', 'Registro', 7],
+];
+defaultTasks.forEach(([name, cat, order]) => {
+  try { db.prepare('INSERT OR IGNORE INTO task_templates (name, category, sort_order) VALUES (?, ?, ?)').run(name, cat, order); } catch (e) {}
+});
+
+// Farms table
+db.exec(`
+  CREATE TABLE IF NOT EXISTS farms (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    location TEXT,
+    notes TEXT,
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+  );
+`);
+// En la plantilla no se crea ninguna granja por defecto: la crea el asistente de primer arranque
+
+// Add farm_id to all tables
+const farmCols = [
+  'pigs', 'batches', 'expenses', 'sales', 'feeding_records', 'health_records',
+  'weight_records', 'inventory_items', 'daily_logs', 'partners', 'reproduction_records',
+  'inventory_categories'
+];
+farmCols.forEach(t => {
+  try { db.exec(`ALTER TABLE ${t} ADD COLUMN farm_id INTEGER DEFAULT 1 REFERENCES farms(id) ON DELETE CASCADE`); } catch (e) {}
+});
+try { db.exec('ALTER TABLE feed_orders ADD COLUMN farm_id INTEGER DEFAULT 1 REFERENCES farms(id) ON DELETE CASCADE'); } catch (e) {}
+// inventory_movements don't need farm_id (they follow the item)
+
+// Insert default inventory categories
+const cats = ['Alimento', 'Medicina', 'Equipo', 'Otros'];
+cats.forEach(name => {
+  try { db.prepare('INSERT OR IGNORE INTO inventory_categories (name) VALUES (?)').run(name); } catch (e) {}
+});
+
+// Create indexes
+const indexSqls = [
+  'CREATE INDEX IF NOT EXISTS idx_feeding_pig ON feeding_records(pig_id)',
+  'CREATE INDEX IF NOT EXISTS idx_feeding_date ON feeding_records(date)',
+  'CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(date)',
+  'CREATE INDEX IF NOT EXISTS idx_sales_date ON sales(date)',
+  'CREATE INDEX IF NOT EXISTS idx_weight_pig ON weight_records(pig_id)',
+  'CREATE INDEX IF NOT EXISTS idx_health_pig ON health_records(pig_id)',
+  'CREATE INDEX IF NOT EXISTS idx_partner_tx ON partner_transactions(partner_id)',
+  'CREATE INDEX IF NOT EXISTS idx_reproduction_sow ON reproduction_records(sow_id)',
+  'CREATE INDEX IF NOT EXISTS idx_reproduction_date ON reproduction_records(mating_date)',
+  'CREATE INDEX IF NOT EXISTS idx_feed_orders_date ON feed_orders(order_date)',
+  'CREATE INDEX IF NOT EXISTS idx_daily_tasks_date ON daily_task_logs(date)',
+];
+indexSqls.forEach(sql => db.exec(sql));
+
+// ========== USUARIOS Y AUTENTICACION ==========
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    name TEXT,
+    role TEXT DEFAULT 'trabajador',
+    farm_id INTEGER,
+    active INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (farm_id) REFERENCES farms(id) ON DELETE SET NULL
+  );
+`);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS setup_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    initialized INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+`);
+
+db.exec('INSERT OR IGNORE INTO setup_state (id, initialized) VALUES (1, 0)');
+
+db.exec('CREATE INDEX IF NOT EXISTS idx_users_farm ON users(farm_id)');
+
+module.exports = db;

@@ -144,3 +144,32 @@ html[data-theme="dark"] { background: #121212; }
   .form-row { grid-template-columns: 1fr; }
   #main-content { padding: 16px; max-height: none; }
 }
+
+/* Auth / Setup */
+.auth-body { display: flex; min-height: 100vh; align-items: center; justify-content: center; padding: 24px 16px; background: linear-gradient(135deg, #0a0a2e 0%, #1a1a6e 40%, #0044cc 100%); }
+.auth-wrap { width: 100%; max-width: 460px; }
+.auth-card { background: #fff; border-radius: 14px; padding: 28px; box-shadow: 0 12px 40px rgba(0,0,0,0.3); }
+.auth-head { text-align: center; margin-bottom: 20px; }
+.auth-logo { width: 120px; height: auto; max-height: 110px; object-fit: contain; border-radius: 10px; border: 3px solid #fff; box-shadow: 0 0 24px rgba(0,170,255,0.5); }
+.auth-head h1 { font-size: 1.3rem; color: #1a1a2e; margin-top: 10px; }
+.auth-title { font-size: 1.1rem; color: #1a1a2e; }
+.auth-sub { font-size: 0.85rem; color: #777; margin: 4px 0 18px; }
+.auth-msg { text-align: center; color: #777; padding: 30px 0; }
+.auth-label { display: block; font-size: 0.8rem; font-weight: 600; color: #555; margin: 12px 0 4px; }
+.auth-input { width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 0.95rem; }
+.auth-input:focus { outline: none; border-color: #4fc3f7; box-shadow: 0 0 0 3px rgba(79,195,247,0.2); }
+.auth-sep { border: none; border-top: 1px solid #eee; margin: 20px 0 4px; }
+.btn-auth { width: 100%; justify-content: center; margin-top: 20px; padding: 12px; background: linear-gradient(135deg, #00d4ff, #0066ff); color: #fff; font-size: 1rem; font-weight: 600; border-radius: 8px; }
+.btn-auth:hover { filter: brightness(1.08); }
+.auth-form .alert { margin-top: 14px; }
+
+/* Sidebar: sesión */
+.user-box { padding: 10px 12px; border-top: 1px solid rgba(255,255,255,0.1); }
+.user-box .user-name { color: #fff; font-size: 0.9rem; font-weight: 600; }
+.user-box .user-role { color: #7d7d9a; font-size: 0.75rem; margin-bottom: 8px; }
+.user-box button { background: none; border: 1px solid rgba(255,255,255,0.2); color: #a0a0b8; padding: 8px 12px; border-radius: 6px; cursor: pointer; width: 100%; font-size: 0.85rem; }
+.user-box button:hover { color: #fff; border-color: rgba(255,255,255,0.4); }
+
+@media (max-width: 768px) {
+  .auth-card { padding: 20px; }
+}

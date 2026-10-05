@@ -1,5 +1,7 @@
 const express = require('express');
 const path = require('path');
+const bcrypt = require('bcryptjs');
+const session = require('express-session');
 const db = require('./database');
 
 const app = express();
@@ -7,6 +9,12 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+app.use(session({
+  secret: process.env.SESSION_SECRET || 'cerdos-secret-change-me',
+  resave: false,
+  saveUninitialized: false,
+  cookie: { httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production' }
+}));
 
 function qAll(sql, params) {
   const stmt = db.prepare(sql);
@@ -16,13 +24,204 @@ function qGet(sql, params) {
   const stmt = db.prepare(sql);
   return params && params.length ? stmt.get(...params) : stmt.get();
 }
+// ========== AUTH ==========
+function setupDone() {
+  const r = qGet('SELECT initialized FROM setup_state WHERE id = 1');
+  return !!(r && r.initialized);
+}
+
+function requireAuth(req, res, next) {
+  if (!req.session || !req.session.user) return res.status(401).json({ error: 'No autenticado' });
+  next();
+}
+
+function requireAdmin(req, res, next) {
+  if (!req.session || !req.session.user) return res.status(401).json({ error: 'No autenticado' });
+  if (req.session.user.role !== 'admin') return res.status(403).json({ error: 'Permiso denegado: se requiere admin' });
+  next();
+}
+
+// Admin puede ver todas las granjas; el resto solo la suya
+function visibleFarmIds(user) {
+  if (user.role === 'admin') {
+    return db.prepare('SELECT id FROM farms').all().map(r => r.id);
+  }
+  return user.farm_id ? [user.farm_id] : [];
+}
+
+function resolveFarm(req) {
+  const user = req.session.user;
+  const requested = req.query.farm_id || (req.body && req.body.farm_id) || req.params.farm_id;
+  if (user.role !== 'admin') return user.farm_id;
+  if (requested) return Number(requested);
+  return null;
+}
+
+function canAccessFarm(req, farmId) {
+  const user = (req.session && req.session.user) || {};
+  if (user.role === 'admin') return true;
+  return farmId != null && Number(farmId) === Number(user.farm_id);
+}
+
+// Granja efectiva para lecturas y escrituras
+function farmIdFor(req) {
+  const requested = (req.body && req.body.farm_id) || req.query.farm_id;
+  if (requested) return Number(requested);
+  const user = (req.session && req.session.user) || {};
+  if (user.role !== 'admin' && user.farm_id) return Number(user.farm_id);
+  const first = qGet('SELECT id FROM farms ORDER BY id LIMIT 1');
+  return first ? first.id : null;
+}
+
+// Todo /api exige sesion, salvo auth/setup
+const PUBLIC_API = [/^\/auth\/(status|setup|login|logout)$/, /^\/auth\/me$/];
+app.use('/api', (req, res, next) => {
+  if (PUBLIC_API.some(re => re.test(req.path))) return next();
+  if (!req.session || !req.session.user) return res.status(401).json({ error: 'No autenticado' });
+  next();
+});
+
+// Un trabajador queda atado a su granja: no puede leer ni escribir en otras
+app.use('/api', (req, res, next) => {
+  const user = req.session && req.session.user;
+  if (!user || user.role === 'admin') return next();
+  if (req.body && typeof req.body === 'object') req.body.farm_id = user.farm_id;
+  req.query.farm_id = user.farm_id;
+  next();
+});
+
+// ========== AUTH API ==========
+app.get('/api/auth/status', (req, res) => {
+  try {
+    res.json({ initialized: setupDone(), authenticated: !!(req.session && req.session.user), user: (req.session && req.session.user) || null });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/auth/setup', (req, res) => {
+  try {
+    if (setupDone()) return res.status(400).json({ error: 'La configuracion inicial ya fue completada' });
+    const { farm_name, farm_location, username, password, name } = req.body || {};
+    if (!farm_name || !username || !password) return res.status(400).json({ error: 'farm_name, username y password son obligatorios' });
+    if (String(password).length < 6) return res.status(400).json({ error: 'La contrasena debe tener al menos 6 caracteres' });
+    if (qGet('SELECT id FROM users WHERE username = ?', [username])) return res.status(400).json({ error: 'Ese usuario ya existe' });
+
+    const farm = db.prepare('INSERT INTO farms (name, location, notes) VALUES (?, ?, ?)').run(farm_name, farm_location || null, null);
+    const farmId = Number(db.prepare('SELECT last_insert_rowid() as id').get().id);
+    const hash = bcrypt.hashSync(String(password), 10);
+    db.prepare('INSERT INTO users (username, password_hash, name, role, farm_id, active) VALUES (?, ?, ?, ?, ?, 1)')
+      .run(username, hash, name || username, 'admin', farmId);
+    db.prepare('UPDATE setup_state SET initialized = 1 WHERE id = 1').run();
+
+    const user = qGet('SELECT id, username, name, role, farm_id FROM users WHERE username = ?', [username]);
+    req.session.user = { id: user.id, username: user.username, name: user.name, role: user.role, farm_id: user.farm_id };
+    res.json({ ok: true, user: req.session.user });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/auth/login', (req, res) => {
+  try {
+    if (!setupDone()) return res.status(400).json({ error: 'Configuracion inicial pendiente' });
+    const { username, password } = req.body || {};
+    if (!username || !password) return res.status(400).json({ error: 'Usuario y contrasena requeridos' });
+    const user = qGet('SELECT * FROM users WHERE username = ?', [username]);
+    if (!user || !bcrypt.compareSync(String(password), user.password_hash)) {
+      return res.status(401).json({ error: 'Usuario o contrasena incorrectos' });
+    }
+    if (!user.active) return res.status(403).json({ error: 'Usuario desactivado' });
+    req.session.user = { id: user.id, username: user.username, name: user.name, role: user.role, farm_id: user.farm_id };
+    res.json({ ok: true, user: req.session.user });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  req.session.destroy(() => res.json({ ok: true }));
+});
+
+app.get('/api/auth/me', (req, res) => {
+  try {
+    if (!req.session || !req.session.user) return res.status(401).json({ error: 'No autenticado' });
+    const farms = req.session.user.role === 'admin'
+      ? db.prepare('SELECT id, name FROM farms ORDER BY name').all()
+      : db.prepare('SELECT id, name FROM farms WHERE id = ?').all(req.session.user.farm_id);
+    res.json({ user: req.session.user, farms });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.put('/api/auth/password', (req, res) => {
+  try {
+    const { current_password, new_password } = req.body || {};
+    if (!current_password || !new_password) return res.status(400).json({ error: 'current_password y new_password requeridos' });
+    if (String(new_password).length < 6) return res.status(400).json({ error: 'La contrasena debe tener al menos 6 caracteres' });
+    const user = qGet('SELECT * FROM users WHERE id = ?', [req.session.user.id]);
+    if (!bcrypt.compareSync(String(current_password), user.password_hash)) return res.status(401).json({ error: 'Contrasena actual incorrecta' });
+    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(bcrypt.hashSync(String(new_password), 10), user.id);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ========== USERS API (solo admin) ==========
+app.get('/api/users', requireAdmin, (req, res) => {
+  try {
+    res.json(db.prepare('SELECT id, username, name, role, farm_id, active, created_at FROM users ORDER BY name').all());
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/users', requireAdmin, (req, res) => {
+  try {
+    const { username, password, name, role, farm_id, active } = req.body || {};
+    if (!username || !password) return res.status(400).json({ error: 'Usuario y contrasena requeridos' });
+    if (String(password).length < 6) return res.status(400).json({ error: 'La contrasena debe tener al menos 6 caracteres' });
+    if (qGet('SELECT id FROM users WHERE username = ?', [username])) return res.status(400).json({ error: 'Ese usuario ya existe' });
+    const targetFarm = role === 'admin' ? (farm_id || null) : (farm_id || req.session.user.farm_id);
+    db.prepare('INSERT INTO users (username, password_hash, name, role, farm_id, active) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(username, bcrypt.hashSync(String(password), 10), name || username, role === 'admin' ? 'admin' : 'trabajador', targetFarm, active === 0 ? 0 : 1);
+    const row = qGet('SELECT last_insert_rowid() as id');
+    res.json({ id: row.id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.put('/api/users/:id', requireAdmin, (req, res) => {
+  try {
+    const { name, role, farm_id, active, password } = req.body || {};
+    const target = qGet('SELECT * FROM users WHERE id = ?', [req.params.id]);
+    if (!target) return res.status(404).json({ error: 'Usuario no encontrado' });
+    const newRole = role === 'admin' ? 'admin' : 'trabajador';
+    const newFarm = newRole === 'admin' ? (farm_id || null) : (farm_id || target.farm_id);
+    if (target.id === req.session.user.id && newRole !== 'admin') return res.status(400).json({ error: 'No puedes quitarte a ti mismo el rol de admin' });
+    db.prepare('UPDATE users SET name = ?, role = ?, farm_id = ?, active = ? WHERE id = ?')
+      .run(name || target.name, newRole, newFarm, active === 0 ? 0 : 1, target.id);
+    if (password) {
+      if (String(password).length < 6) return res.status(400).json({ error: 'La contrasena debe tener al menos 6 caracteres' });
+      db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(bcrypt.hashSync(String(password), 10), target.id);
+    }
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/users/:id', requireAdmin, (req, res) => {
+  try {
+    if (Number(req.params.id) === Number(req.session.user.id)) return res.status(400).json({ error: 'No puedes eliminarte a ti mismo' });
+    const remaining = qGet("SELECT COUNT(*) as c FROM users WHERE role = 'admin' AND active = 1 AND id != ?", [req.params.id]);
+    const target = qGet('SELECT role FROM users WHERE id = ?', [req.params.id]);
+    if (target && target.role === 'admin' && remaining.c < 1) return res.status(400).json({ error: 'Debe quedar al menos un admin activo' });
+    db.prepare('DELETE FROM users WHERE id = ?').run(req.params.id);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 
 // ========== FARMS API ==========
 app.get('/api/farms', (req, res) => {
-  try { res.json(db.prepare('SELECT * FROM farms ORDER BY name').all()); } catch (e) { res.status(500).json({ error: e.message }); }
+  try {
+    const user = req.session.user;
+    const rows = user.role === 'admin'
+      ? db.prepare('SELECT * FROM farms ORDER BY name').all()
+      : db.prepare('SELECT * FROM farms WHERE id = ?').all(user.farm_id);
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.post('/api/farms', (req, res) => {
+app.post('/api/farms', requireAdmin, (req, res) => {
   try {
     const { name, location, notes } = req.body;
     if (!name) return res.status(400).json({ error: 'Nombre requerido' });
@@ -35,7 +234,7 @@ app.post('/api/farms', (req, res) => {
   }
 });
 
-app.put('/api/farms/:id', (req, res) => {
+app.put('/api/farms/:id', requireAdmin, (req, res) => {
   try {
     const { name, location, notes } = req.body;
     db.prepare('UPDATE farms SET name=?, location=?, notes=? WHERE id=?')
@@ -44,7 +243,7 @@ app.put('/api/farms/:id', (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.delete('/api/farms/:id', (req, res) => {
+app.delete('/api/farms/:id', requireAdmin, (req, res) => {
   try { db.prepare('DELETE FROM farms WHERE id = ?').run(req.params.id); res.json({ ok: true }); } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -66,6 +265,7 @@ app.get('/api/pigs/:id', (req, res) => {
   try {
     const pig = db.prepare('SELECT * FROM pigs WHERE id = ?').get(req.params.id);
     if (!pig) return res.status(404).json({ error: 'Cerdo no encontrado' });
+    if (!canAccessFarm(req, pig.farm_id)) return res.status(403).json({ error: 'No tienes acceso a este cerdo' });
     res.json(pig);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -76,7 +276,7 @@ app.post('/api/pigs', (req, res) => {
     if (!identifier) return res.status(400).json({ error: 'Identificador requerido' });
     db.prepare(
       "INSERT INTO pigs (identifier, name, breed, sex, birth_date, purchase_date, purchase_cost, notes, batch_id, farm_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    ).run(identifier, name || null, breed || null, sex || 'macho', birth_date || null, purchase_date || null, purchase_cost || 0, notes || null, batch_id || null, farm_id || 1);
+    ).run(identifier, name || null, breed || null, sex || 'macho', birth_date || null, purchase_date || null, purchase_cost || 0, notes || null, batch_id || null, farmIdFor(req));
     const row = db.prepare('SELECT last_insert_rowid() as id').get();
     res.json({ id: row.id });
   } catch (e) {
@@ -87,16 +287,22 @@ app.post('/api/pigs', (req, res) => {
 
 app.put('/api/pigs/:id', (req, res) => {
   try {
+    const current = db.prepare('SELECT * FROM pigs WHERE id = ?').get(req.params.id);
+    if (!current) return res.status(404).json({ error: 'Cerdo no encontrado' });
+    if (!canAccessFarm(req, current.farm_id)) return res.status(403).json({ error: 'No tienes acceso a este cerdo' });
     const { identifier, name, breed, sex, birth_date, purchase_date, purchase_cost, status, notes, batch_id, farm_id } = req.body;
     db.prepare(
       "UPDATE pigs SET identifier=?, name=?, breed=?, sex=?, birth_date=?, purchase_date=?, purchase_cost=?, status=?, notes=?, batch_id=?, farm_id=?, updated_at=datetime('now','localtime') WHERE id=?"
-    ).run(identifier, name, breed, sex || 'macho', birth_date, purchase_date, purchase_cost, status || 'active', notes, batch_id || null, farm_id || 1, req.params.id);
+    ).run(identifier, name, breed, sex || 'macho', birth_date, purchase_date, purchase_cost, status || 'active', notes, batch_id || null, farmIdFor(req), req.params.id);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.delete('/api/pigs/:id', (req, res) => {
   try {
+    const pig = db.prepare('SELECT * FROM pigs WHERE id = ?').get(req.params.id);
+    if (!pig) return res.status(404).json({ error: 'Cerdo no encontrado' });
+    if (!canAccessFarm(req, pig.farm_id)) return res.status(403).json({ error: 'No tienes acceso a este cerdo' });
     db.prepare('DELETE FROM pigs WHERE id = ?').run(req.params.id);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -125,14 +331,20 @@ app.post('/api/feeding', (req, res) => {
     const totalCost = (cost_per_kg || 0) * quantity_kg;
     db.prepare(
       'INSERT INTO feeding_records (pig_id, date, food_type, quantity_kg, cost_per_kg, total_cost, notes, farm_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(pig_id, date, food_type || null, quantity_kg, cost_per_kg || 0, totalCost, notes || null, farm_id || 1);
+    ).run(pig_id, date, food_type || null, quantity_kg, cost_per_kg || 0, totalCost, notes || null, farmIdFor(req));
     const row = db.prepare('SELECT last_insert_rowid() as id').get();
     res.json({ id: row.id });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.delete('/api/feeding/:id', (req, res) => {
-  try { db.prepare('DELETE FROM feeding_records WHERE id = ?').run(req.params.id); res.json({ ok: true }); } catch (e) { res.status(500).json({ error: e.message }); }
+  try {
+    const row = db.prepare('SELECT * FROM feeding_records WHERE id = ?').get(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Registro no encontrado' });
+    if (!canAccessFarm(req, row.farm_id)) return res.status(403).json({ error: 'No tienes acceso a este registro' });
+    db.prepare('DELETE FROM feeding_records WHERE id = ?').run(req.params.id);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ========== EXPENSES API ==========
@@ -156,14 +368,20 @@ app.post('/api/expenses', (req, res) => {
     const { date, category, description, amount, pig_id, partner_id, notes, farm_id } = req.body;
     if (!date || !category || !amount) return res.status(400).json({ error: 'date, category y amount requeridos' });
     db.prepare('INSERT INTO expenses (date, category, description, amount, pig_id, partner_id, notes, farm_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(date, category, description || null, amount, pig_id || null, partner_id || null, notes || null, farm_id || 1);
+      .run(date, category, description || null, amount, pig_id || null, partner_id || null, notes || null, farmIdFor(req));
     const row = db.prepare('SELECT last_insert_rowid() as id').get();
     res.json({ id: row.id });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.delete('/api/expenses/:id', (req, res) => {
-  try { db.prepare('DELETE FROM expenses WHERE id = ?').run(req.params.id); res.json({ ok: true }); } catch (e) { res.status(500).json({ error: e.message }); }
+  try {
+    const row = db.prepare('SELECT * FROM expenses WHERE id = ?').get(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Registro no encontrado' });
+    if (!canAccessFarm(req, row.farm_id)) return res.status(403).json({ error: 'No tienes acceso a este registro' });
+    db.prepare('DELETE FROM expenses WHERE id = ?').run(req.params.id);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ========== SALES API ==========
@@ -186,7 +404,7 @@ app.post('/api/sales', (req, res) => {
     const { date, pig_id, buyer_name, quantity_kg, price_per_kg, total_amount, sale_type, notes, farm_id } = req.body;
     if (!date || !total_amount) return res.status(400).json({ error: 'date y total_amount requeridos' });
     db.prepare('INSERT INTO sales (date, pig_id, buyer_name, quantity_kg, price_per_kg, total_amount, sale_type, notes, farm_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(date, pig_id || null, buyer_name || null, quantity_kg || null, price_per_kg || null, total_amount, sale_type || 'pig', notes || null, farm_id || 1);
+      .run(date, pig_id || null, buyer_name || null, quantity_kg || null, price_per_kg || null, total_amount, sale_type || 'pig', notes || null, farmIdFor(req));
     if (pig_id) {
       db.prepare('UPDATE pigs SET status = ? WHERE id = ?').run('sold', pig_id);
     }
@@ -196,7 +414,13 @@ app.post('/api/sales', (req, res) => {
 });
 
 app.delete('/api/sales/:id', (req, res) => {
-  try { db.prepare('DELETE FROM sales WHERE id = ?').run(req.params.id); res.json({ ok: true }); } catch (e) { res.status(500).json({ error: e.message }); }
+  try {
+    const row = db.prepare('SELECT * FROM sales WHERE id = ?').get(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Registro no encontrado' });
+    if (!canAccessFarm(req, row.farm_id)) return res.status(403).json({ error: 'No tienes acceso a este registro' });
+    db.prepare('DELETE FROM sales WHERE id = ?').run(req.params.id);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ========== WEIGHT API ==========
@@ -220,14 +444,20 @@ app.post('/api/weight', (req, res) => {
     const { pig_id, date, weight_kg, notes, farm_id } = req.body;
     if (!pig_id || !date || !weight_kg) return res.status(400).json({ error: 'pig_id, date y weight_kg requeridos' });
     db.prepare('INSERT INTO weight_records (pig_id, date, weight_kg, notes, farm_id) VALUES (?, ?, ?, ?, ?)')
-      .run(pig_id, date, weight_kg, notes || null, farm_id || 1);
+      .run(pig_id, date, weight_kg, notes || null, farmIdFor(req));
     const row = db.prepare('SELECT last_insert_rowid() as id').get();
     res.json({ id: row.id });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.delete('/api/weight/:id', (req, res) => {
-  try { db.prepare('DELETE FROM weight_records WHERE id = ?').run(req.params.id); res.json({ ok: true }); } catch (e) { res.status(500).json({ error: e.message }); }
+  try {
+    const row = db.prepare('SELECT * FROM weight_records WHERE id = ?').get(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Registro no encontrado' });
+    if (!canAccessFarm(req, row.farm_id)) return res.status(403).json({ error: 'No tienes acceso a este registro' });
+    db.prepare('DELETE FROM weight_records WHERE id = ?').run(req.params.id);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ========== HEALTH API ==========
@@ -252,14 +482,20 @@ app.post('/api/health', (req, res) => {
     const { pig_id, date, record_type, description, medicine, cost, next_due_date, notes, farm_id } = req.body;
     if (!pig_id || !date || !record_type) return res.status(400).json({ error: 'pig_id, date y record_type requeridos' });
     db.prepare('INSERT INTO health_records (pig_id, date, record_type, description, medicine, cost, next_due_date, notes, farm_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(pig_id, date, record_type, description || null, medicine || null, cost || 0, next_due_date || null, notes || null, farm_id || 1);
+      .run(pig_id, date, record_type, description || null, medicine || null, cost || 0, next_due_date || null, notes || null, farmIdFor(req));
     const row = db.prepare('SELECT last_insert_rowid() as id').get();
     res.json({ id: row.id });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.delete('/api/health/:id', (req, res) => {
-  try { db.prepare('DELETE FROM health_records WHERE id = ?').run(req.params.id); res.json({ ok: true }); } catch (e) { res.status(500).json({ error: e.message }); }
+  try {
+    const row = db.prepare('SELECT * FROM health_records WHERE id = ?').get(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Registro no encontrado' });
+    if (!canAccessFarm(req, row.farm_id)) return res.status(403).json({ error: 'No tienes acceso a este registro' });
+    db.prepare('DELETE FROM health_records WHERE id = ?').run(req.params.id);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ========== REPORTS / STATS ==========
@@ -304,6 +540,7 @@ app.get('/api/reports/pig/:id', (req, res) => {
   try {
     const pig = db.prepare('SELECT * FROM pigs WHERE id = ?').get(req.params.id);
     if (!pig) return res.status(404).json({ error: 'Cerdo no encontrado' });
+    if (!canAccessFarm(req, pig.farm_id)) return res.status(403).json({ error: 'No tienes acceso a este cerdo' });
     const feedRecords = db.prepare('SELECT * FROM feeding_records WHERE pig_id = ? ORDER BY date').all(req.params.id);
     const weightRecords = db.prepare('SELECT * FROM weight_records WHERE pig_id = ? ORDER BY date').all(req.params.id);
     const healthRecords = db.prepare('SELECT * FROM health_records WHERE pig_id = ? ORDER BY date DESC').all(req.params.id);
@@ -349,7 +586,7 @@ app.post('/api/partners', (req, res) => {
     const { name, investment, investment_type, date, phone, notes, farm_id } = req.body;
     if (!name) return res.status(400).json({ error: 'Nombre requerido' });
     db.prepare('INSERT INTO partners (name, investment, investment_type, date, phone, notes, farm_id) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(name, investment || 0, investment_type || 'capital', date || null, phone || null, notes || null, farm_id || 1);
+      .run(name, investment || 0, investment_type || 'capital', date || null, phone || null, notes || null, farmIdFor(req));
     const row = db.prepare('SELECT last_insert_rowid() as id').get();
     res.json({ id: row.id });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -357,6 +594,9 @@ app.post('/api/partners', (req, res) => {
 
 app.put('/api/partners/:id', (req, res) => {
   try {
+    const current = db.prepare('SELECT * FROM partners WHERE id = ?').get(req.params.id);
+    if (!current) return res.status(404).json({ error: 'Socio no encontrado' });
+    if (!canAccessFarm(req, current.farm_id)) return res.status(403).json({ error: 'No tienes acceso a este socio' });
     const { name, investment, investment_type, date, phone, status, notes } = req.body;
     if (status) {
       db.prepare("UPDATE partners SET status=?, updated_at=datetime('now','localtime') WHERE id=?")
@@ -370,18 +610,30 @@ app.put('/api/partners/:id', (req, res) => {
 });
 
 app.delete('/api/partners/:id', (req, res) => {
-  try { db.prepare('DELETE FROM partners WHERE id = ?').run(req.params.id); res.json({ ok: true }); } catch (e) { res.status(500).json({ error: e.message }); }
+  try {
+    const current = db.prepare('SELECT * FROM partners WHERE id = ?').get(req.params.id);
+    if (!current) return res.status(404).json({ error: 'Socio no encontrado' });
+    if (!canAccessFarm(req, current.farm_id)) return res.status(403).json({ error: 'No tienes acceso a este socio' });
+    db.prepare('DELETE FROM partners WHERE id = ?').run(req.params.id);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Partner transactions
 app.get('/api/partners/:id/transactions', (req, res) => {
   try {
+    const partner = db.prepare('SELECT * FROM partners WHERE id = ?').get(req.params.id);
+    if (!partner) return res.status(404).json({ error: 'Socio no encontrado' });
+    if (!canAccessFarm(req, partner.farm_id)) return res.status(403).json({ error: 'No tienes acceso a este socio' });
     res.json(db.prepare('SELECT * FROM partner_transactions WHERE partner_id = ? ORDER BY date DESC').all(req.params.id));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/partners/:id/transactions', (req, res) => {
   try {
+    const partner = db.prepare('SELECT * FROM partners WHERE id = ?').get(req.params.id);
+    if (!partner) return res.status(404).json({ error: 'Socio no encontrado' });
+    if (!canAccessFarm(req, partner.farm_id)) return res.status(403).json({ error: 'No tienes acceso a este socio' });
     const { date, type, amount, description, notes } = req.body;
     if (!date || !type || !amount) return res.status(400).json({ error: 'date, type y amount requeridos' });
     db.prepare('INSERT INTO partner_transactions (partner_id, date, type, amount, description, notes) VALUES (?, ?, ?, ?, ?, ?)')
@@ -410,7 +662,7 @@ app.post('/api/batches', (req, res) => {
     const { name, start_date, notes, farm_id } = req.body;
     if (!name) return res.status(400).json({ error: 'Nombre requerido' });
     db.prepare('INSERT INTO batches (name, start_date, notes, farm_id) VALUES (?, ?, ?, ?)')
-      .run(name, start_date || null, notes || null, farm_id || 1);
+      .run(name, start_date || null, notes || null, farmIdFor(req));
     const row = db.prepare('SELECT last_insert_rowid() as id').get();
     res.json({ id: row.id });
   } catch (e) {
@@ -421,15 +673,21 @@ app.post('/api/batches', (req, res) => {
 
 app.put('/api/batches/:id', (req, res) => {
   try {
+    const current = db.prepare('SELECT * FROM batches WHERE id = ?').get(req.params.id);
+    if (!current) return res.status(404).json({ error: 'Lote no encontrado' });
+    if (!canAccessFarm(req, current.farm_id)) return res.status(403).json({ error: 'No tienes acceso a este lote' });
     const { name, start_date, notes, farm_id } = req.body;
     db.prepare("UPDATE batches SET name=?, start_date=?, notes=?, farm_id=?, updated_at=datetime('now','localtime') WHERE id=?")
-      .run(name, start_date || null, notes || null, farm_id || 1, req.params.id);
+      .run(name, start_date || null, notes || null, farmIdFor(req), req.params.id);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.delete('/api/batches/:id', (req, res) => {
   try {
+    const batch = db.prepare('SELECT * FROM batches WHERE id = ?').get(req.params.id);
+    if (!batch) return res.status(404).json({ error: 'Lote no encontrado' });
+    if (!canAccessFarm(req, batch.farm_id)) return res.status(403).json({ error: 'No tienes acceso a este lote' });
     db.prepare('UPDATE pigs SET batch_id = NULL WHERE batch_id = ?').run(req.params.id);
     db.prepare('DELETE FROM batches WHERE id = ?').run(req.params.id);
     res.json({ ok: true });
@@ -438,7 +696,12 @@ app.delete('/api/batches/:id', (req, res) => {
 
 // ========== INVENTORY API ==========
 app.get('/api/inventory/categories', (req, res) => {
-  try { res.json(db.prepare('SELECT * FROM inventory_categories ORDER BY name').all()); } catch (e) { res.status(500).json({ error: e.message }); }
+  try {
+    const user = req.session.user;
+    res.json(user.role === 'admin'
+      ? db.prepare('SELECT * FROM inventory_categories ORDER BY name').all()
+      : db.prepare('SELECT * FROM inventory_categories WHERE farm_id = ? ORDER BY name').all(user.farm_id));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/inventory/items', (req, res) => {
@@ -459,7 +722,7 @@ app.post('/api/inventory/items', (req, res) => {
     const { name, category_id, current_qty, unit, min_qty, unit_cost, notes, farm_id } = req.body;
     if (!name) return res.status(400).json({ error: 'Nombre requerido' });
     db.prepare('INSERT INTO inventory_items (name, category_id, current_qty, unit, min_qty, unit_cost, notes, farm_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(name, category_id || null, current_qty || 0, unit || 'kg', min_qty || 0, unit_cost || 0, notes || null, farm_id || 1);
+      .run(name, category_id || null, current_qty || 0, unit || 'kg', min_qty || 0, unit_cost || 0, notes || null, farmIdFor(req));
     const row = db.prepare('SELECT last_insert_rowid() as id').get();
     res.json({ id: row.id });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -467,25 +730,42 @@ app.post('/api/inventory/items', (req, res) => {
 
 app.put('/api/inventory/items/:id', (req, res) => {
   try {
+    const current = db.prepare('SELECT * FROM inventory_items WHERE id = ?').get(req.params.id);
+    if (!current) return res.status(404).json({ error: 'Articulo no encontrado' });
+    if (!canAccessFarm(req, current.farm_id)) return res.status(403).json({ error: 'No tienes acceso a este articulo' });
     const { name, category_id, current_qty, unit, min_qty, unit_cost, notes, farm_id } = req.body;
     db.prepare("UPDATE inventory_items SET name=?, category_id=?, current_qty=?, unit=?, min_qty=?, unit_cost=?, notes=?, farm_id=?, updated_at=datetime('now','localtime') WHERE id=?")
-      .run(name, category_id || null, current_qty || 0, unit || 'kg', min_qty || 0, unit_cost || 0, notes || null, farm_id || 1, req.params.id);
+      .run(name, category_id || null, current_qty || 0, unit || 'kg', min_qty || 0, unit_cost || 0, notes || null, farmIdFor(req), req.params.id);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.delete('/api/inventory/items/:id', (req, res) => {
-  try { db.prepare('DELETE FROM inventory_items WHERE id = ?').run(req.params.id); res.json({ ok: true }); } catch (e) { res.status(500).json({ error: e.message }); }
+  try {
+    const item = db.prepare('SELECT * FROM inventory_items WHERE id = ?').get(req.params.id);
+    if (!item) return res.status(404).json({ error: 'Articulo no encontrado' });
+    if (!canAccessFarm(req, item.farm_id)) return res.status(403).json({ error: 'No tienes acceso a este articulo' });
+    db.prepare('DELETE FROM inventory_items WHERE id = ?').run(req.params.id);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/inventory/items/:id/movements', (req, res) => {
-  try { res.json(db.prepare('SELECT * FROM inventory_movements WHERE item_id = ? ORDER BY date DESC, id DESC').all(req.params.id)); } catch (e) { res.status(500).json({ error: e.message }); }
+  try {
+    const item = db.prepare('SELECT * FROM inventory_items WHERE id = ?').get(req.params.id);
+    if (!item) return res.status(404).json({ error: 'Articulo no encontrado' });
+    if (!canAccessFarm(req, item.farm_id)) return res.status(403).json({ error: 'No tienes acceso a este articulo' });
+    res.json(db.prepare('SELECT * FROM inventory_movements WHERE item_id = ? ORDER BY date DESC, id DESC').all(req.params.id));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/inventory/movements', (req, res) => {
   try {
     const { item_id, date, type, quantity, description } = req.body;
     if (!item_id || !date || !type || !quantity) return res.status(400).json({ error: 'item_id, date, type y quantity requeridos' });
+    const item = db.prepare('SELECT * FROM inventory_items WHERE id = ?').get(item_id);
+    if (!item) return res.status(404).json({ error: 'Articulo no encontrado' });
+    if (!canAccessFarm(req, item.farm_id)) return res.status(403).json({ error: 'No tienes acceso a este articulo' });
     db.prepare('INSERT INTO inventory_movements (item_id, date, type, quantity, description) VALUES (?, ?, ?, ?, ?)')
       .run(item_id, date, type, quantity, description || null);
     db.prepare('UPDATE inventory_items SET current_qty = current_qty + ?, updated_at = datetime(\'now\',\'localtime\') WHERE id = ?')
@@ -515,7 +795,7 @@ app.post('/api/daily_logs', (req, res) => {
     const { date, title, content, farm_id } = req.body;
     if (!date) return res.status(400).json({ error: 'Fecha requerida' });
     db.prepare('INSERT INTO daily_logs (date, title, content, farm_id) VALUES (?, ?, ?, ?)')
-      .run(date, title || null, content || null, farm_id || 1);
+      .run(date, title || null, content || null, farmIdFor(req));
     const row = db.prepare('SELECT last_insert_rowid() as id').get();
     res.json({ id: row.id });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -523,15 +803,24 @@ app.post('/api/daily_logs', (req, res) => {
 
 app.put('/api/daily_logs/:id', (req, res) => {
   try {
+    const current = db.prepare('SELECT * FROM daily_logs WHERE id = ?').get(req.params.id);
+    if (!current) return res.status(404).json({ error: 'Registro no encontrado' });
+    if (!canAccessFarm(req, current.farm_id)) return res.status(403).json({ error: 'No tienes acceso a este registro' });
     const { date, title, content, farm_id } = req.body;
     db.prepare('UPDATE daily_logs SET date=?, title=?, content=?, farm_id=? WHERE id=?')
-      .run(date, title || null, content || null, farm_id || 1, req.params.id);
+      .run(date, title || null, content || null, farmIdFor(req), req.params.id);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.delete('/api/daily_logs/:id', (req, res) => {
-  try { db.prepare('DELETE FROM daily_logs WHERE id = ?').run(req.params.id); res.json({ ok: true }); } catch (e) { res.status(500).json({ error: e.message }); }
+  try {
+    const row = db.prepare('SELECT * FROM daily_logs WHERE id = ?').get(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Registro no encontrado' });
+    if (!canAccessFarm(req, row.farm_id)) return res.status(403).json({ error: 'No tienes acceso a este registro' });
+    db.prepare('DELETE FROM daily_logs WHERE id = ?').run(req.params.id);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ========== FEED ORDERS API ==========
@@ -556,7 +845,7 @@ app.post('/api/feed-orders', (req, res) => {
     if (!supplier || !order_date || !item_name || !quantity_ordered) return res.status(400).json({ error: 'supplier, order_date, item_name y quantity_ordered requeridos' });
     const totalCost = (unit_cost || 0) * quantity_ordered;
     db.prepare('INSERT INTO feed_orders (supplier, order_date, delivery_date, item_name, quantity_ordered, quantity_received, unit_cost, total_cost, status, notes, farm_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(supplier, order_date, delivery_date || null, item_name, quantity_ordered, 0, unit_cost || 0, totalCost, 'pending', notes || null, farm_id || 1);
+      .run(supplier, order_date, delivery_date || null, item_name, quantity_ordered, 0, unit_cost || 0, totalCost, 'pending', notes || null, farmIdFor(req));
     const row = db.prepare('SELECT last_insert_rowid() as id').get();
     res.json({ id: row.id });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -564,6 +853,9 @@ app.post('/api/feed-orders', (req, res) => {
 
 app.put('/api/feed-orders/:id', (req, res) => {
   try {
+    const current = db.prepare('SELECT * FROM feed_orders WHERE id = ?').get(req.params.id);
+    if (!current) return res.status(404).json({ error: 'Pedido no encontrado' });
+    if (!canAccessFarm(req, current.farm_id)) return res.status(403).json({ error: 'No tienes acceso a este pedido' });
     const { supplier, order_date, delivery_date, item_name, quantity_ordered, quantity_received, unit_cost, status, notes, farm_id } = req.body;
     const totalCost = (unit_cost || 0) * (quantity_received || quantity_ordered);
     const qty = quantity_received || 0;
@@ -584,7 +876,13 @@ app.put('/api/feed-orders/:id', (req, res) => {
 });
 
 app.delete('/api/feed-orders/:id', (req, res) => {
-  try { db.prepare('DELETE FROM feed_orders WHERE id = ?').run(req.params.id); res.json({ ok: true }); } catch (e) { res.status(500).json({ error: e.message }); }
+  try {
+    const row = db.prepare('SELECT * FROM feed_orders WHERE id = ?').get(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Pedido no encontrado' });
+    if (!canAccessFarm(req, row.farm_id)) return res.status(403).json({ error: 'No tienes acceso a este pedido' });
+    db.prepare('DELETE FROM feed_orders WHERE id = ?').run(req.params.id);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ========== DAILY TASKS API ==========
@@ -683,6 +981,7 @@ app.get('/api/family-tree/:id', (req, res) => {
   try {
     const pig = db.prepare('SELECT * FROM pigs WHERE id = ?').get(req.params.id);
     if (!pig) return res.status(404).json({ error: 'Cerdo no encontrado' });
+    if (!canAccessFarm(req, pig.farm_id)) return res.status(403).json({ error: 'No tienes acceso a este cerdo' });
     // Find mother: this pig is in the piglets_alive of a reproduction record
     const asChild = db.prepare(`
       SELECT r.*, s.identifier as mother_identifier, b.identifier as father_identifier
@@ -732,7 +1031,7 @@ app.post('/api/reproduction', (req, res) => {
     const { sow_id, boar_id, mating_date, expected_farrowing_date, farrowing_date, piglets_alive, piglets_dead, result, notes, farm_id } = req.body;
     if (!sow_id || !mating_date) return res.status(400).json({ error: 'sow_id y mating_date requeridos' });
     db.prepare(`INSERT INTO reproduction_records (sow_id, boar_id, mating_date, expected_farrowing_date, farrowing_date, piglets_alive, piglets_dead, result, notes, farm_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(sow_id, boar_id || null, mating_date, expected_farrowing_date || null, farrowing_date || null, piglets_alive || 0, piglets_dead || 0, result || null, notes || null, farm_id || 1);
+      .run(sow_id, boar_id || null, mating_date, expected_farrowing_date || null, farrowing_date || null, piglets_alive || 0, piglets_dead || 0, result || null, notes || null, farmIdFor(req));
     const row = db.prepare('SELECT last_insert_rowid() as id').get();
     res.json({ id: row.id });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -740,6 +1039,9 @@ app.post('/api/reproduction', (req, res) => {
 
 app.put('/api/reproduction/:id', (req, res) => {
   try {
+    const current = db.prepare('SELECT * FROM reproduction_records WHERE id = ?').get(req.params.id);
+    if (!current) return res.status(404).json({ error: 'Registro no encontrado' });
+    if (!canAccessFarm(req, current.farm_id)) return res.status(403).json({ error: 'No tienes acceso a este registro' });
     const { boar_id, mating_date, expected_farrowing_date, farrowing_date, piglets_alive, piglets_dead, result, notes } = req.body;
     db.prepare(`UPDATE reproduction_records SET boar_id=?, mating_date=?, expected_farrowing_date=?, farrowing_date=?, piglets_alive=?, piglets_dead=?, result=?, notes=? WHERE id=?`)
       .run(boar_id || null, mating_date, expected_farrowing_date || null, farrowing_date || null, piglets_alive || 0, piglets_dead || 0, result || null, notes || null, req.params.id);
@@ -748,12 +1050,21 @@ app.put('/api/reproduction/:id', (req, res) => {
 });
 
 app.delete('/api/reproduction/:id', (req, res) => {
-  try { db.prepare('DELETE FROM reproduction_records WHERE id = ?').run(req.params.id); res.json({ ok: true }); } catch (e) { res.status(500).json({ error: e.message }); }
+  try {
+    const row = db.prepare('SELECT * FROM reproduction_records WHERE id = ?').get(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Registro no encontrado' });
+    if (!canAccessFarm(req, row.farm_id)) return res.status(403).json({ error: 'No tienes acceso a este registro' });
+    db.prepare('DELETE FROM reproduction_records WHERE id = ?').run(req.params.id);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ========== DEATH API ==========
 app.post('/api/pigs/:id/death', (req, res) => {
   try {
+    const pig = db.prepare('SELECT * FROM pigs WHERE id = ?').get(req.params.id);
+    if (!pig) return res.status(404).json({ error: 'Cerdo no encontrado' });
+    if (!canAccessFarm(req, pig.farm_id)) return res.status(403).json({ error: 'No tienes acceso a este cerdo' });
     const { death_date, death_cause, notes } = req.body;
     if (!death_date) return res.status(400).json({ error: 'death_date requerido' });
     db.prepare("UPDATE pigs SET status='dead', death_date=?, death_cause=?, notes=COALESCE(?,'') || CHAR(10) || COALESCE(notes,''), updated_at=datetime('now','localtime') WHERE id=?")
@@ -767,6 +1078,7 @@ app.get('/api/reports/batch/:id', (req, res) => {
   try {
     const batch = db.prepare('SELECT * FROM batches WHERE id = ?').get(req.params.id);
     if (!batch) return res.status(404).json({ error: 'Lote no encontrado' });
+    if (!canAccessFarm(req, batch.farm_id)) return res.status(403).json({ error: 'No tienes acceso a este lote' });
     const pigs = db.prepare('SELECT * FROM pigs WHERE batch_id = ? ORDER BY identifier').all(req.params.id);
     const totals = db.prepare(`
       SELECT
@@ -805,8 +1117,8 @@ app.post('/api/reports/compare-batches', (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ========== BACKUP / RESTORE ==========
-app.get('/api/backup', (req, res) => {
+// ========== BACKUP / RESTORE (solo admin) ==========
+app.get('/api/backup', requireAdmin, (req, res) => {
   try {
     const backup = {
       version: 2,
@@ -834,14 +1146,17 @@ app.get('/api/backup', (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.post('/api/restore', (req, res) => {
+app.post('/api/restore', requireAdmin, (req, res) => {
   try {
     const data = req.body;
-    if (!data || !data.pigs) return res.status(400).json({ error: 'Respaldos inválido' });
+    if (!data || !data.pigs) return res.status(400).json({ error: 'Respaldos invÃ¡lido' });
     db.exec('PRAGMA foreign_keys=OFF');
-    ['daily_task_logs', 'task_templates', 'feed_orders', 'reproduction_records', 'inventory_movements', 'inventory_items', 'inventory_categories', 'daily_logs', 'batches', 'partner_transactions', 'partners', 'health_records', 'weight_records', 'sales', 'expenses', 'feeding_records', 'pigs', 'farms'].forEach(t => {
+    ['daily_task_logs', 'task_templates', 'feed_orders', 'reproduction_records', 'inventory_movements', 'inventory_items', 'inventory_categories', 'daily_logs', 'batches', 'partner_transactions', 'partners', 'health_records', 'weight_records', 'sales', 'expenses', 'feeding_records', 'pigs'].forEach(t => {
       db.prepare(`DELETE FROM ${t}`).run();
     });
+    // Las granjas no se borran: los usuarios quedan atados a la suya
+    const insertFarm = db.prepare('INSERT OR IGNORE INTO farms (id, name, location, notes) VALUES (?, ?, ?, ?)');
+    (data.farms || []).forEach(f => insertFarm.run(f.id, f.name, f.location, f.notes));
     const insertPig = db.prepare('INSERT INTO pigs (id, identifier, name, breed, birth_date, purchase_date, purchase_cost, status, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
     data.pigs.forEach(p => insertPig.run(p.id, p.identifier, p.name, p.breed, p.birth_date, p.purchase_date, p.purchase_cost, p.status, p.notes, p.created_at, p.updated_at));
     const insertFeed = db.prepare('INSERT INTO feeding_records (id, pig_id, date, food_type, quantity_kg, cost_per_kg, total_cost, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
@@ -877,13 +1192,21 @@ app.post('/api/restore', (req, res) => {
     const insertDT = db.prepare('INSERT INTO daily_task_logs (id, date, task_template_id, completed, notes) VALUES (?, ?, ?, ?, ?)');
     (data.daily_task_logs || []).forEach(r => insertDT.run(r.id, r.date, r.task_template_id, r.completed, r.notes));
     db.exec('PRAGMA foreign_keys=ON');
-    // Ensure default farm exists
-    try { db.prepare("INSERT OR IGNORE INTO farms (id, name, location) VALUES (1, 'Granja Principal', '')").run(); } catch (e) {}
+    // El usuario que restaura puede quedar sin granja: se le asigna la primera
+    const orphan = db.prepare('SELECT id FROM users WHERE farm_id IS NULL').all();
+    if (orphan.length) {
+      const first = qGet('SELECT id FROM farms ORDER BY id LIMIT 1');
+      if (first) {
+        const fix = db.prepare('UPDATE users SET farm_id = ? WHERE farm_id IS NULL');
+        orphan.forEach(() => fix.run(first.id));
+      }
+    }
     res.json({ ok: true, count: { pigs: data.pigs.length, feeding: (data.feeding || []).length, expenses: (data.expenses || []).length, sales: (data.sales || []).length, weight: (data.weight || []).length, health: (data.health || []).length, partners: (data.partners || []).length, batches: (data.batches || []).length, inventory_items: (data.inventory_items || []).length, daily_logs: (data.daily_logs || []).length, reproduction: (data.reproduction || []).length, feed_orders: (data.feed_orders || []).length } });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ========== START ==========
 app.listen(PORT, () => {
-  console.log(`🚀 Sistema Cerdos by LOMI corriendo en http://localhost:${PORT}`);
+  console.log(`ðŸš€ Sistema Cerdos by LOMI corriendo en http://localhost:${PORT}`);
 });
+

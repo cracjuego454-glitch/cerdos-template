@@ -1,6 +1,17 @@
 const API = {
   getFarmId() { return localStorage.getItem('farm_id') || ''; },
   setFarmId(id) { localStorage.setItem('farm_id', id); },
+
+  // Si el servidor responde 401 la sesion seMurio: de vuelta al login
+  async parse(r) {
+    if (r.status === 401) { location.href = 'login.html'; throw new Error('Sesion expirada'); }
+    return r.json().catch(() => ({}));
+  },
+  check(r) {
+    if (r.status === 401) { location.href = 'login.html'; }
+    return r;
+  },
+
   async get(url) {
     const f = this.getFarmId();
     if (f && url.startsWith('/api/') && !url.includes('farm_id=')) {
@@ -8,26 +19,26 @@ const API = {
       url += `${sep}farm_id=${f}`;
     }
     const r = await fetch(url);
-    if (!r.ok) throw new Error(await r.text());
+    if (!r.ok) { this.check(r); throw new Error((await this.parse(r)).error || 'Error'); }
     return r.json();
   },
   async post(url, data) {
     const f = this.getFarmId();
     if (f && url.startsWith('/api/') && !data.farm_id) data.farm_id = parseInt(f);
     const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
-    if (!r.ok) throw new Error((await r.json()).error || 'Error');
+    if (!r.ok) { this.check(r); throw new Error((await this.parse(r)).error || 'Error'); }
     return r.json();
   },
   async put(url, data) {
     const f = this.getFarmId();
     if (f && url.startsWith('/api/') && !data.farm_id) data.farm_id = parseInt(f);
     const r = await fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
-    if (!r.ok) throw new Error((await r.json()).error || 'Error');
+    if (!r.ok) { this.check(r); throw new Error((await this.parse(r)).error || 'Error'); }
     return r.json();
   },
   async delete(url) {
     const r = await fetch(url, { method: 'DELETE' });
-    if (!r.ok) throw new Error((await r.json()).error || 'Error');
+    if (!r.ok) { this.check(r); throw new Error((await this.parse(r)).error || 'Error'); }
     return r.json();
   },
 
