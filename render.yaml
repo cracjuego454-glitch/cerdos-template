@@ -1,32 +1,37 @@
 # Blueprint de Render para cerdos-template
 #
-# ATENCION: los discos persistentes de Render solo existen en planes de pago.
-# Si usas el plan gratuito, SQLite vive en un sistema de archivos efimero y
-# se pierde en cada redespliegue. Para persistir en el plan gratuito hace
-# falta una base de datos externa (por ejemplo Neon o Supabase) y cambiar la
-# capa de conexion.
+# La base de datos NO esta en Render: vive en Turso (libSQL), que tiene plan
+# gratuito de 5 GB. Asi el servicio puede seguir en el plan gratuito de Render.
+#
+# Al desplegar por primera vez hay que crear la base en https://app.turso.tech
+# y poner estas dos variables de entorno con los valores que da la CLI:
+#   TURSO_DATABASE_URL  ->  libsql://mi-granja.turso.io
+#   TURSO_AUTH_TOKEN    ->  el token que genera `turso db tokens create`
+#
+# Sin esas dos variables la app NO arranca en produccion: se niega a usar un
+# fichero local, porque en Render ese fichero se pierde en cada redespliegue.
+# Si prefieres tirar sin Turso, pon ALLOW_LOCAL_DB=1 y se guardara en un disco
+# de pago (Render no da disco en el plan gratuito).
+#
+# Esta configuracion es para la nube. Para servirlo desde un PC propio,
+# copia este repositorio y arranca con ALLOW_LOCAL_DB=1 y COOKIE_SECURE=never.
 services:
   - type: web
     name: cerdos-app
     env: node
-    # plan: starter   # <- comentalo para volver al plan gratuito (sin persistencia)
-    plan: starter
+    plan: free
     buildCommand: npm install
     startCommand: node server.js
     repo: https://github.com/cracjuego454-glitch/cerdos-template
     branch: main
     autoDeploy: true
     healthCheckPath: /login.html
-    disk:
-      name: cerdos-data
-      mountPath: /opt/render/project/src/data
-      sizeGB: 1
     envVars:
       - key: NODE_ENV
         value: production
-      - key: PORT
-        value: 10000
-      - key: DATA_DIR
-        value: /opt/render/project/src/data
       - key: SESSION_SECRET
         generateValue: true
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false

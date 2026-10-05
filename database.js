@@ -1,19 +1,16 @@
-const { DatabaseSync } = require('node:sqlite');
-const path = require('path');
-const fs = require('fs');
+const db = require('./db');
 
-// DATA_DIR permite montar la base en un disco persistente (ver render.yaml)
-const dbDir = process.env.DATA_DIR
-  ? path.resolve(process.env.DATA_DIR)
-  : path.join(__dirname, 'data');
-if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
+// El esquema se crea al arrancar, no al importar el modulo: con libSQL cada
+// sentencia es una peticion de red y necesita `await`.
+const DEFAULT_CATEGORIES = ['Alimento', 'Medicina', 'Equipo', 'Otros'];
 
-const db = new DatabaseSync(path.join(dbDir, 'cerdos.db'));
+async function init() {
+if (!db.isRemote) {
+  try { await db.exec(`PRAGMA journal_mode=WAL`); } catch (e) {}
+}
+try { await db.exec(`PRAGMA foreign_keys=ON`); } catch (e) {}
 
-db.exec(`PRAGMA journal_mode=WAL`);
-db.exec(`PRAGMA foreign_keys=ON`);
-
-db.exec(`
+await db.exec(`
   CREATE TABLE IF NOT EXISTS pigs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     identifier TEXT UNIQUE NOT NULL,
@@ -164,18 +161,18 @@ db.exec(`
 `);
 
 // Add partner_id to expenses (if not exists)
-try { db.exec('ALTER TABLE expenses ADD COLUMN partner_id INTEGER REFERENCES partners(id) ON DELETE SET NULL'); } catch (e) {}
-try { db.exec('ALTER TABLE feeding_records ADD COLUMN partner_id INTEGER REFERENCES partners(id) ON DELETE SET NULL'); } catch (e) {}
-try { db.exec('ALTER TABLE pigs ADD COLUMN partner_id INTEGER REFERENCES partners(id) ON DELETE SET NULL'); } catch (e) {}
-try { db.exec("ALTER TABLE partners ADD COLUMN status TEXT DEFAULT 'active'"); } catch (e) {}
-try { db.exec('ALTER TABLE pigs ADD COLUMN batch_id INTEGER REFERENCES batches(id) ON DELETE SET NULL'); } catch (e) {}
-try { db.exec('ALTER TABLE sales ADD COLUMN batch_id INTEGER REFERENCES batches(id) ON DELETE SET NULL'); } catch (e) {}
-try { db.exec("ALTER TABLE pigs ADD COLUMN sex TEXT DEFAULT 'macho'"); } catch (e) {}
-try { db.exec("ALTER TABLE pigs ADD COLUMN death_date TEXT"); } catch (e) {}
-try { db.exec("ALTER TABLE pigs ADD COLUMN death_cause TEXT"); } catch (e) {}
+try { await db.exec('ALTER TABLE expenses ADD COLUMN partner_id INTEGER REFERENCES partners(id) ON DELETE SET NULL'); } catch (e) {}
+try { await db.exec('ALTER TABLE feeding_records ADD COLUMN partner_id INTEGER REFERENCES partners(id) ON DELETE SET NULL'); } catch (e) {}
+try { await db.exec('ALTER TABLE pigs ADD COLUMN partner_id INTEGER REFERENCES partners(id) ON DELETE SET NULL'); } catch (e) {}
+try { await db.exec("ALTER TABLE partners ADD COLUMN status TEXT DEFAULT 'active'"); } catch (e) {}
+try { await db.exec('ALTER TABLE pigs ADD COLUMN batch_id INTEGER REFERENCES batches(id) ON DELETE SET NULL'); } catch (e) {}
+try { await db.exec('ALTER TABLE sales ADD COLUMN batch_id INTEGER REFERENCES batches(id) ON DELETE SET NULL'); } catch (e) {}
+try { await db.exec("ALTER TABLE pigs ADD COLUMN sex TEXT DEFAULT 'macho'"); } catch (e) {}
+try { await db.exec("ALTER TABLE pigs ADD COLUMN death_date TEXT"); } catch (e) {}
+try { await db.exec("ALTER TABLE pigs ADD COLUMN death_cause TEXT"); } catch (e) {}
 
 // Reproduction records
-db.exec(`
+await db.exec(`
   CREATE TABLE IF NOT EXISTS reproduction_records (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     sow_id INTEGER NOT NULL,
@@ -194,7 +191,7 @@ db.exec(`
 `);
 
 // Feed orders
-db.exec(`
+await db.exec(`
   CREATE TABLE IF NOT EXISTS feed_orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     supplier TEXT NOT NULL,
@@ -213,7 +210,7 @@ db.exec(`
 `);
 
 // Task templates
-db.exec(`
+await db.exec(`
   CREATE TABLE IF NOT EXISTS task_templates (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -223,7 +220,7 @@ db.exec(`
 `);
 
 // Daily task logs
-db.exec(`
+await db.exec(`
   CREATE TABLE IF NOT EXISTS daily_task_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     date TEXT NOT NULL,
@@ -244,12 +241,12 @@ const defaultTasks = [
   ['Aplicar medicamentos', 'Salud', 6],
   ['Registrar pesos', 'Registro', 7],
 ];
-defaultTasks.forEach(([name, cat, order]) => {
-  try { db.prepare('INSERT OR IGNORE INTO task_templates (name, category, sort_order) VALUES (?, ?, ?)').run(name, cat, order); } catch (e) {}
-});
+for (const [name, cat, order] of defaultTasks) {
+  try { await db.prepare('INSERT OR IGNORE INTO task_templates (name, category, sort_order) VALUES (?, ?, ?)').run(name, cat, order); } catch (e) {}
+}
 
 // Farms table
-db.exec(`
+await db.exec(`
   CREATE TABLE IF NOT EXISTS farms (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
@@ -266,17 +263,11 @@ const farmCols = [
   'weight_records', 'inventory_items', 'daily_logs', 'partners', 'reproduction_records',
   'inventory_categories'
 ];
-farmCols.forEach(t => {
-  try { db.exec(`ALTER TABLE ${t} ADD COLUMN farm_id INTEGER DEFAULT 1 REFERENCES farms(id) ON DELETE CASCADE`); } catch (e) {}
-});
-try { db.exec('ALTER TABLE feed_orders ADD COLUMN farm_id INTEGER DEFAULT 1 REFERENCES farms(id) ON DELETE CASCADE'); } catch (e) {}
+for (const t of farmCols) {
+  try { await db.exec(`ALTER TABLE ${t} ADD COLUMN farm_id INTEGER DEFAULT 1 REFERENCES farms(id) ON DELETE CASCADE`); } catch (e) {}
+}
+try { await db.exec('ALTER TABLE feed_orders ADD COLUMN farm_id INTEGER DEFAULT 1 REFERENCES farms(id) ON DELETE CASCADE'); } catch (e) {}
 // inventory_movements don't need farm_id (they follow the item)
-
-// Insert default inventory categories
-const cats = ['Alimento', 'Medicina', 'Equipo', 'Otros'];
-cats.forEach(name => {
-  try { db.prepare('INSERT OR IGNORE INTO inventory_categories (name) VALUES (?)').run(name); } catch (e) {}
-});
 
 // Create indexes
 const indexSqls = [
@@ -292,10 +283,10 @@ const indexSqls = [
   'CREATE INDEX IF NOT EXISTS idx_feed_orders_date ON feed_orders(order_date)',
   'CREATE INDEX IF NOT EXISTS idx_daily_tasks_date ON daily_task_logs(date)',
 ];
-indexSqls.forEach(sql => db.exec(sql));
+for (const sql of indexSqls) { try { await db.exec(sql); } catch (e) {} }
 
 // ========== USUARIOS Y AUTENTICACION ==========
-db.exec(`
+await db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT UNIQUE NOT NULL,
@@ -309,7 +300,7 @@ db.exec(`
   );
 `);
 
-db.exec(`
+await db.exec(`
   CREATE TABLE IF NOT EXISTS setup_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     initialized INTEGER DEFAULT 0,
@@ -317,8 +308,32 @@ db.exec(`
   );
 `);
 
-db.exec('INSERT OR IGNORE INTO setup_state (id, initialized) VALUES (1, 0)');
+await db.exec('INSERT OR IGNORE INTO setup_state (id, initialized) VALUES (1, 0)');
 
-db.exec('CREATE INDEX IF NOT EXISTS idx_users_farm ON users(farm_id)');
+await db.exec('CREATE INDEX IF NOT EXISTS idx_users_farm ON users(farm_id)');
+}
+
+// Las categorias de inventario por defecto se insertan al crear cada granja,
+// porque inventory_categories.farm_id apunta a farms y la plantilla no crea
+// ninguna granja por defecto.
+// Las categorias de inventario son un catalogo comun a todas las granjas
+// ("Alimento", "Medicina", "Equipo", "Otros"): el esquema las declara con
+// name UNIQUE, asi que cada nombre existe una sola vez en la base. El stock si
+// es de cada granja, porque inventory_items guarda su propio farm_id.
+//
+// Antes, cada granja nueva intentaba insertar sus propias categorias y el
+// INSERT OR IGNORE las descartaba en silencio por el UNIQUE global, con lo
+// que esa granja se quedaba sin categorias.
+async function ensureDefaultCategories() {
+  for (const name of DEFAULT_CATEGORIES) {
+    try {
+      await db.prepare('INSERT OR IGNORE INTO inventory_categories (name) VALUES (?)').run(name);
+    } catch (e) {
+      console.error('No se pudo crear la categoria "' + name + '":', e.message);
+    }
+  }
+}
 
 module.exports = db;
+module.exports.init = init;
+module.exports.ensureDefaultCategories = ensureDefaultCategories;
