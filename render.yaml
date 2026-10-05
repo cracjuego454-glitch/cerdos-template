@@ -1,18 +1,32 @@
+# Blueprint de Render para cerdos-template
+#
+# ATENCION: los discos persistentes de Render solo existen en planes de pago.
+# Si usas el plan gratuito, SQLite vive en un sistema de archivos efimero y
+# se pierde en cada redespliegue. Para persistir en el plan gratuito hace
+# falta una base de datos externa (por ejemplo Neon o Supabase) y cambiar la
+# capa de conexion.
 services:
   - type: web
     name: cerdos-app
     env: node
-    plan: free
+    # plan: starter   # <- comentalo para volver al plan gratuito (sin persistencia)
+    plan: starter
     buildCommand: npm install
     startCommand: node server.js
     repo: https://github.com/cracjuego454-glitch/cerdos-template
     branch: main
     autoDeploy: true
-    healthCheckPath: /
+    healthCheckPath: /login.html
+    disk:
+      name: cerdos-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
     envVars:
       - key: NODE_ENV
         value: production
       - key: PORT
         value: 10000
+      - key: DATA_DIR
+        value: /opt/render/project/src/data
       - key: SESSION_SECRET
         generateValue: true
